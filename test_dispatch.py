@@ -48,12 +48,22 @@ def test_acquire_no_owner_stores_null_owner(db):
     assert dispatch.handle_who(db, "lock") == "-\n"
 
 
-def test_acquire_not_reentrant_for_current_owner(db):
+def test_acquire_same_owner_can_reacquire_active_lease(db):
     resp1 = dispatch.handle_acquire(db, "lock", 5, "alice")
-    token1, _ = resp1.strip().split()
-    # alice tries to re-acquire her own still-active lease
+    token1, v1 = resp1.strip().split()
+
+    # alice re-acquires her own still-active lease: not "someone else", so it succeeds
     resp2 = dispatch.handle_acquire(db, "lock", 5, "alice")
-    assert resp2 == "NULL\n"
+    token2, v2 = resp2.strip().split()
+    assert token2 != token1  # token rotates even on self-reacquire
+    assert int(v2) == int(v1) + 1
+
+
+def test_acquire_anonymous_lease_not_reentrant(db):
+    # owner=None has no identity to prove "same caller", so it stays locked until expiry
+    dispatch.handle_acquire(db, "lock", 5, None)
+    resp = dispatch.handle_acquire(db, "lock", 5, None)
+    assert resp == "NULL\n"
 
 
 # --- RENEW -------------------------------------------------------------------
@@ -74,7 +84,7 @@ def test_renew_extends_expiry_and_returns_unchanged_version(db, clock):
 def test_renew_wrong_token_fails(db):
     dispatch.handle_acquire(db, "lock", 5, "alice")
     resp = dispatch.handle_renew(db, "lock", "not-the-real-token", 10)
-    assert resp == "ERR not-found\n"
+    assert resp == "ERR wrong-token\n"
 
 
 def test_renew_expired_lease_fails_even_with_correct_token(db, clock):
@@ -84,7 +94,7 @@ def test_renew_expired_lease_fails_even_with_correct_token(db, clock):
     clock.advance(10)  # past TTL
 
     renew_resp = dispatch.handle_renew(db, "lock", token, 10)
-    assert renew_resp == "ERR not-found\n"
+    assert renew_resp == "ERR expired\n"
 
 
 def test_renew_nonexistent_lease_fails(db):
@@ -105,7 +115,7 @@ def test_release_success_frees_the_lease(db):
 def test_release_wrong_token_fails(db):
     dispatch.handle_acquire(db, "lock", 5, "alice")
     resp = dispatch.handle_release(db, "lock", "not-the-real-token")
-    assert resp == "ERR not-found\n"
+    assert resp == "ERR wrong-token\n"
 
 
 def test_release_expired_lease_fails(db, clock):
@@ -114,7 +124,7 @@ def test_release_expired_lease_fails(db, clock):
 
     clock.advance(10)
 
-    assert dispatch.handle_release(db, "lock", token) == "ERR not-found\n"
+    assert dispatch.handle_release(db, "lock", token) == "ERR expired\n"
 
 
 def test_release_nonexistent_lease_fails(db):
@@ -132,7 +142,7 @@ def test_release_then_reacquire_gets_fresh_token(db):
     assert token2 != token1
 
     # the old token must no longer work against the new holder's lease
-    assert dispatch.handle_release(db, "lock", token1) == "ERR not-found\n"
+    assert dispatch.handle_release(db, "lock", token1) == "ERR wrong-token\n"
 
 
 # --- WHO -------------------------------------------------------------------

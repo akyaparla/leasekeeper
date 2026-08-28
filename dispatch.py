@@ -4,7 +4,7 @@ import uuid
 
 def handle_acquire(db: sqlite3.Connection, name: str, ttl_secs: int, owner: str | None) -> str:
     now = time.time()
-    token = uuid.uuid4().hex
+    token = uuid.uuid4().hex  # generates random 128-bit id
     expires_at = now + ttl_secs
     params = {
         "name": name, 
@@ -14,6 +14,7 @@ def handle_acquire(db: sqlite3.Connection, name: str, ttl_secs: int, owner: str 
         "now": now
     }
 
+    # Only update when owner of existing lease sends ACQUIRE or lease is expired
     cursor = db.execute(
         """
         INSERT INTO leases (name, token, owner, version, expires_at)
@@ -23,7 +24,7 @@ def handle_acquire(db: sqlite3.Connection, name: str, ttl_secs: int, owner: str 
             owner      = excluded.owner,
             version    = leases.version + 1,
             expires_at = excluded.expires_at
-        WHERE leases.expires_at <= :now
+        WHERE leases.expires_at <= :now OR leases.owner = :owner
         RETURNING token, version
         """,
         params
@@ -41,9 +42,9 @@ def handle_renew(db: sqlite3.Connection, name: str, token: str, ttl_secs: int) -
     now = time.time()
     expires_at = now + ttl_secs
     params = {
-        "name": name, 
-        "token": token, 
-        "expires_at": expires_at, 
+        "name": name,
+        "token": token,
+        "expires_at": expires_at,
         "now": now
     }
     cursor = db.execute(
@@ -59,7 +60,14 @@ def handle_renew(db: sqlite3.Connection, name: str, token: str, ttl_secs: int) -
     db.commit()
 
     if row is None:
-        return "ERR not-found\n"
+        existing = db.execute(
+            "SELECT token FROM leases WHERE name = :name", {"name": name}
+        ).fetchone()
+        if existing is None:  # Name not found
+            return "ERR not-found\n"
+        if existing[0] != token:  # User provided wrong token
+            return "ERR wrong-token\n"
+        return "ERR expired\n"  # name and token both matched, so expires_at <= now
 
     version, = row
     return f"{version}\n"
@@ -84,7 +92,14 @@ def handle_release(db: sqlite3.Connection, name: str, token: str) -> str:
     db.commit()
 
     if row is None:
-        return "ERR not-found\n"
+        existing = db.execute(
+            "SELECT token FROM leases WHERE name = :name", {"name": name}
+        ).fetchone()
+        if existing is None:
+            return "ERR not-found\n"
+        if existing[0] != token:
+            return "ERR wrong-token\n"
+        return "ERR expired\n"  # name and token both matched, so expires_at <= now
 
     return "OK\n"
 
