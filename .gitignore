@@ -1,3 +1,5 @@
 take-home-project.md
 *.pyc
 *.db
+__pycache__/
+.pytest_cache/

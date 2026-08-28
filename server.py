@@ -52,18 +52,22 @@ async def worker(db: sqlite3.Connection, queue: asyncio.PriorityQueue):
         else:
             fut.set_result(result)
 
-async def main():
-    db = init_db()
+async def start(host: str, port: int, db_path: str = "leases.db"):
+    db = init_db(db_path)
     queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
-    asyncio.create_task(worker(db, queue))
-
+    worker_task = asyncio.create_task(worker(db, queue))
     server = await asyncio.start_server(
-        functools.partial(handle_client, queue), '127.0.0.1', get_port()
+        functools.partial(handle_client, queue), host, port
     )
+    return server, db, worker_task
+
+async def main():
+    server, db, worker_task = await start('127.0.0.1', get_port())
     addr = server.sockets[0].getsockname()
     print(f'Serving on {addr}')
 
     async with server:
         await server.serve_forever()
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
