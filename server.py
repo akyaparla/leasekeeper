@@ -5,7 +5,7 @@ import itertools
 import sys
 from asyncio import StreamReader, StreamWriter
 
-def get_port() -> int:
+def get_port() -> int:  # configurable port
     if len(sys.argv) > 1:
         return int(sys.argv[1])
     return 6380
@@ -28,18 +28,21 @@ async def handle_client(queue: asyncio.PriorityQueue, metrics: Metrics, reader: 
                 if not data:
                     break
                 message = data.decode()
-                parts = message.rstrip('\n').split()
+                # grab commands and args
+                parts = message.rstrip('\n').split() 
                 if len(parts) == 0:
                     raise ValueError
                 cmd, args = parts[0], parts[1:]
 
+                # set empty "fut" var that the worker will populate with an err or response
                 fut = asyncio.get_running_loop().create_future()
                 priority = 0 if cmd == "ACQUIRE" else 1
                 await queue.put((priority, next(_seq), cmd, args, fut))
                 response = await fut
-
+                # fut populated, return to client
                 writer.write(response.encode())
             except (ValueError, UnicodeDecodeError):
+                # Malformed or invalid input
                 metrics.errors += 1
                 writer.write(b"ERR bad-request\n")
                 continue
@@ -50,6 +53,7 @@ async def handle_client(queue: asyncio.PriorityQueue, metrics: Metrics, reader: 
         await writer.wait_closed()
 
 async def worker(db: sqlite3.Connection, queue: asyncio.PriorityQueue, metrics: Metrics):
+    # worker waits for queue to be populated, then runs dispatch
     while True:
         _, _, cmd, args, fut = await queue.get()
         try:
@@ -61,13 +65,15 @@ async def worker(db: sqlite3.Connection, queue: asyncio.PriorityQueue, metrics: 
                 metrics.acquires += 1
             elif cmd == "RENEW":
                 metrics.renews += 1
-            fut.set_result(result)
+            fut.set_result(result)  # populated, go back to main server loop
 
 async def start(host: str, port: int, db_path: str = "leases.db", metrics_port: int = 0):
     db = init_db(db_path)
     queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
     metrics = Metrics()
+    # start worker on queue
     worker_task = asyncio.create_task(worker(db, queue, metrics))
+    # use functools to feed servers with required inputs
     server = await asyncio.start_server(
         functools.partial(handle_client, queue, metrics), host, port
     )
