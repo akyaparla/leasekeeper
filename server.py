@@ -1,11 +1,14 @@
 import sqlite3
 import asyncio
 import functools
+import itertools
 from asyncio import StreamReader, StreamWriter
 
 from dispatch import dispatch_command, init_db
 
-async def handle_client(db: sqlite3.Connection, reader: StreamReader, writer: StreamWriter):
+_seq = itertools.count()
+
+async def handle_client(queue: asyncio.PriorityQueue, reader: StreamReader, writer: StreamWriter):
     try:
         while True:
             try:
@@ -16,7 +19,12 @@ async def handle_client(db: sqlite3.Connection, reader: StreamReader, writer: St
                 parts = message.rstrip('\n').split()
                 if len(parts) == 0:
                     raise ValueError
-                response = await dispatch_command(db, parts[0], parts[1:])
+                cmd, args = parts[0], parts[1:]
+
+                fut = asyncio.get_running_loop().create_future()
+                priority = 0 if cmd == "ACQUIRE" else 1
+                await queue.put((priority, next(_seq), cmd, args, fut))
+                response = await fut
 
                 writer.write(response.encode())
             except (ValueError, UnicodeDecodeError):
@@ -28,10 +36,23 @@ async def handle_client(db: sqlite3.Connection, reader: StreamReader, writer: St
         writer.close()
         await writer.wait_closed()
 
+async def worker(db: sqlite3.Connection, queue: asyncio.PriorityQueue):
+    while True:
+        _, _, cmd, args, fut = await queue.get()
+        try:
+            result = await dispatch_command(db, cmd, args)
+        except Exception as e:
+            fut.set_exception(e)
+        else:
+            fut.set_result(result)
+
 async def main():
     db = init_db()
+    queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
+    asyncio.create_task(worker(db, queue))
+
     server = await asyncio.start_server(
-        functools.partial(handle_client, db), '127.0.0.1', 6380
+        functools.partial(handle_client, queue), '127.0.0.1', 6380
     )
     addr = server.sockets[0].getsockname()
     print(f'Serving on {addr}')
