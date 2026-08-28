@@ -2,7 +2,13 @@ import sqlite3
 import asyncio
 import functools
 import itertools
+import sys
 from asyncio import StreamReader, StreamWriter
+
+def get_port() -> int:
+    if len(sys.argv) > 1:
+        return int(sys.argv[1])
+    return 6380
 
 from dispatch import dispatch_command, init_db
 
@@ -52,7 +58,7 @@ async def main():
     asyncio.create_task(worker(db, queue))
 
     server = await asyncio.start_server(
-        functools.partial(handle_client, queue), '127.0.0.1', 6380
+        functools.partial(handle_client, queue), '127.0.0.1', get_port()
     )
     addr = server.sockets[0].getsockname()
     print(f'Serving on {addr}')
