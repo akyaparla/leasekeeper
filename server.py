@@ -10,11 +10,17 @@ def get_port() -> int:
         return int(sys.argv[1])
     return 6380
 
+def get_metrics_port(port: int) -> int:
+    if len(sys.argv) > 2:
+        return int(sys.argv[2])
+    return port + 1
+
 from dispatch import dispatch_command, init_db
+from metrics import Metrics, handle_metrics_request
 
 _seq = itertools.count()
 
-async def handle_client(queue: asyncio.PriorityQueue, reader: StreamReader, writer: StreamWriter):
+async def handle_client(queue: asyncio.PriorityQueue, metrics: Metrics, reader: StreamReader, writer: StreamWriter):
     try:
         while True:
             try:
@@ -34,6 +40,7 @@ async def handle_client(queue: asyncio.PriorityQueue, reader: StreamReader, writ
 
                 writer.write(response.encode())
             except (ValueError, UnicodeDecodeError):
+                metrics.errors += 1
                 writer.write(b"ERR bad-request\n")
                 continue
             finally:
@@ -42,7 +49,7 @@ async def handle_client(queue: asyncio.PriorityQueue, reader: StreamReader, writ
         writer.close()
         await writer.wait_closed()
 
-async def worker(db: sqlite3.Connection, queue: asyncio.PriorityQueue):
+async def worker(db: sqlite3.Connection, queue: asyncio.PriorityQueue, metrics: Metrics):
     while True:
         _, _, cmd, args, fut = await queue.get()
         try:
@@ -50,23 +57,36 @@ async def worker(db: sqlite3.Connection, queue: asyncio.PriorityQueue):
         except Exception as e:
             fut.set_exception(e)
         else:
+            if cmd == "ACQUIRE":
+                metrics.acquires += 1
+            elif cmd == "RENEW":
+                metrics.renews += 1
             fut.set_result(result)
 
-async def start(host: str, port: int, db_path: str = "leases.db"):
+async def start(host: str, port: int, db_path: str = "leases.db", metrics_port: int = 0):
     db = init_db(db_path)
     queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
-    worker_task = asyncio.create_task(worker(db, queue))
+    metrics = Metrics()
+    worker_task = asyncio.create_task(worker(db, queue, metrics))
     server = await asyncio.start_server(
-        functools.partial(handle_client, queue), host, port
+        functools.partial(handle_client, queue, metrics), host, port
     )
-    return server, db, worker_task
+    metrics_server = await asyncio.start_server(
+        functools.partial(handle_metrics_request, metrics), host, metrics_port
+    )
+    return server, db, worker_task, metrics_server, metrics
 
 async def main():
-    server, db, worker_task = await start('127.0.0.1', get_port())
+    port = get_port()
+    server, db, worker_task, metrics_server, metrics = await start(
+        '127.0.0.1', port, metrics_port=get_metrics_port(port)
+    )
     addr = server.sockets[0].getsockname()
+    metrics_addr = metrics_server.sockets[0].getsockname()
     print(f'Serving on {addr}')
+    print(f'Metrics on http://{metrics_addr[0]}:{metrics_addr[1]}/metrics')
 
-    async with server:
+    async with server, metrics_server:
         await server.serve_forever()
 
 if __name__ == "__main__":

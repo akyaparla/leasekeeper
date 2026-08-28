@@ -38,14 +38,33 @@ def clock(monkeypatch):
 @pytest_asyncio.fixture
 async def running_server():
     """A real server instance (server.py's actual start()) on an ephemeral port."""
-    srv, db_conn, worker_task = await server.start("127.0.0.1", 0, db_path=":memory:")
+    srv, db_conn, worker_task, metrics_srv, _metrics = await server.start("127.0.0.1", 0, db_path=":memory:")
     port = srv.sockets[0].getsockname()[1]
     try:
         yield port
     finally:
         worker_task.cancel()
         srv.close()
+        metrics_srv.close()
         await srv.wait_closed()
+        await metrics_srv.wait_closed()
+        db_conn.close()
+
+
+@pytest_asyncio.fixture
+async def running_server_with_metrics():
+    """Like running_server, but also exposes the /metrics HTTP port for metrics tests."""
+    srv, db_conn, worker_task, metrics_srv, _metrics = await server.start("127.0.0.1", 0, db_path=":memory:")
+    port = srv.sockets[0].getsockname()[1]
+    metrics_port = metrics_srv.sockets[0].getsockname()[1]
+    try:
+        yield port, metrics_port
+    finally:
+        worker_task.cancel()
+        srv.close()
+        metrics_srv.close()
+        await srv.wait_closed()
+        await metrics_srv.wait_closed()
         db_conn.close()
 
 
