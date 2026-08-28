@@ -121,6 +121,16 @@ def handle_ttl(db: sqlite3.Connection, name: str) -> str:
 
     return f"{int(remaining)}\n"
 
+def handle_list(db: sqlite3.Connection) -> str:
+    now = time.time()
+    rows = db.execute(
+        "SELECT name FROM leases WHERE expires_at > :now ORDER BY name",
+        {"now": now},
+    ).fetchall()
+
+    names = [name for name, in rows]
+    return " ".join(names) + "\n"
+
 async def dispatch_command(db, cmd: str, args: list[str]) -> str:
     if cmd == "ACQUIRE":
         if len(args) not in (2, 3):
@@ -154,6 +164,10 @@ async def dispatch_command(db, cmd: str, args: list[str]) -> str:
             raise ValueError
         name = args[0]
         return handle_ttl(db, name)
+    elif cmd == "LIST":
+        if len(args) != 0:
+            raise ValueError
+        return handle_list(db)
     else:
         raise ValueError
 

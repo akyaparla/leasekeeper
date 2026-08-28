@@ -60,6 +60,20 @@ async def test_disconnect_mid_command_does_not_crash_server(running_server):
     await c.close()
 
 
+@pytest.mark.asyncio
+async def test_list_reflects_active_leases(client, running_server):
+    assert await client.send("LIST") == "\n"
+
+    await client.send("ACQUIRE zeta 5 alice")
+    await client.send("ACQUIRE alpha 5 bob")
+
+    other = await Client.connect(running_server)
+    resp = await other.send("LIST")
+    await other.close()
+
+    assert resp == "alpha zeta\n"
+
+
 # --- concurrency: the spec's actual correctness requirement -----------------
 
 @pytest.mark.asyncio

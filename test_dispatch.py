@@ -172,6 +172,32 @@ def test_ttl_expired_lease_returns_null(db, clock):
     assert dispatch.handle_ttl(db, "lock") == "NULL\n"
 
 
+# --- LIST -------------------------------------------------------------------
+
+def test_list_no_leases_returns_empty_line(db):
+    assert dispatch.handle_list(db) == "\n"
+
+
+def test_list_returns_active_lease_names_sorted(db):
+    dispatch.handle_acquire(db, "zeta", 5, "alice")
+    dispatch.handle_acquire(db, "alpha", 5, "bob")
+    assert dispatch.handle_list(db) == "alpha zeta\n"
+
+
+def test_list_excludes_expired_and_released_leases(db, clock):
+    dispatch.handle_acquire(db, "expiring", 5, "alice")
+
+    resp = dispatch.handle_acquire(db, "released", 5, "bob")
+    released_token, _ = resp.strip().split()
+    dispatch.handle_release(db, "released", released_token)
+
+    dispatch.handle_acquire(db, "active", 100, "carol")
+
+    clock.advance(10)  # expires "expiring" (ttl 5); "active" (ttl 100) survives
+
+    assert dispatch.handle_list(db) == "active\n"
+
+
 # --- dispatch_command validation --------------------------------------------
 
 @pytest.mark.asyncio
@@ -214,6 +240,12 @@ async def test_dispatch_release_bad_arity_raises(db, args):
 async def test_dispatch_who_ttl_bad_arity_raises(db, cmd, args):
     with pytest.raises(ValueError):
         await dispatch.dispatch_command(db, cmd, args)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_list_bad_arity_raises(db):
+    with pytest.raises(ValueError):
+        await dispatch.dispatch_command(db, "LIST", ["extra"])
 
 
 @pytest.mark.asyncio
