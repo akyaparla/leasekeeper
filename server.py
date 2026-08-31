@@ -29,7 +29,7 @@ async def handle_client(queue: asyncio.PriorityQueue, metrics: Metrics, reader: 
                     break
                 message = data.decode()
                 # grab commands and args
-                parts = message.rstrip('\n').split() 
+                parts = message.rstrip('\n').split()
                 if len(parts) == 0:
                     raise ValueError
                 cmd, args = parts[0], parts[1:]
@@ -58,6 +58,7 @@ async def worker(db: sqlite3.Connection, queue: asyncio.PriorityQueue, metrics: 
         _, _, cmd, args, fut = await queue.get()
         try:
             result = await dispatch_command(db, cmd, args)
+            await asyncio.sleep(0)
         except Exception as e:
             fut.set_exception(e)
         else:

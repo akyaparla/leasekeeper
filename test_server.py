@@ -1,5 +1,7 @@
 import asyncio
 import itertools
+import socket
+import threading
 
 import pytest
 
@@ -112,6 +114,75 @@ async def test_priority_queue_dequeues_acquire_first_regardless_of_arrival_order
         order_out.append(cmd)
 
     assert order_out == ["ACQUIRE", "ACQUIRE", "WHO", "TTL", "RELEASE", "RENEW", "WHO"]
+
+
+@pytest.mark.asyncio
+async def test_tcp_acquire_arriving_during_backlog_is_prioritized(monkeypatch):
+    """A TCP ACQUIRE must preempt pending work after the active command finishes."""
+    backlog_size = 100
+    queue = asyncio.PriorityQueue()
+    metrics = server.Metrics()
+    db = server.init_db(":memory:")
+    execution_order = []
+    backlog_at_first_dispatch = []
+    first_who_started = threading.Event()
+    acquire_client_ready = threading.Event()
+    acquire_sent = threading.Event()
+    real_dispatch = server.dispatch_command
+
+    async def record_dispatch(db_connection, cmd, args):
+        execution_order.append(cmd)
+        if cmd == "WHO" and not first_who_started.is_set():
+            backlog_at_first_dispatch.append(queue.qsize())
+            first_who_started.set()
+            assert acquire_sent.wait(timeout=5)
+        return await real_dispatch(db_connection, cmd, args)
+
+    monkeypatch.setattr(server, "dispatch_command", record_dispatch)
+    worker_task = asyncio.create_task(server.worker(db, queue, metrics))
+    tcp_server = await asyncio.start_server(
+        lambda reader, writer: server.handle_client(queue, metrics, reader, writer),
+        "127.0.0.1",
+        0,
+    )
+    port = tcp_server.sockets[0].getsockname()[1]
+
+    def acquire_from_thread():
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            acquire_client_ready.set()
+            if not first_who_started.wait(timeout=5):
+                raise TimeoutError("WHO backlog did not start")
+            sock.sendall(b"ACQUIRE new-lock 30 owner\n")
+            acquire_sent.set()
+            with sock.makefile("rb") as response_file:
+                return response_file.readline().decode()
+
+    acquire_task = asyncio.create_task(asyncio.to_thread(acquire_from_thread))
+    who_clients = []
+    try:
+        while not acquire_client_ready.is_set():
+            await asyncio.sleep(0)
+
+        who_clients = [await Client.connect(port) for _ in range(backlog_size)]
+        who_tasks = [
+            asyncio.create_task(client.send("WHO existing-lock"))
+            for client in who_clients
+        ]
+        await asyncio.gather(*who_tasks)
+        acquire_response = await acquire_task
+    finally:
+        for client in who_clients:
+            await client.close()
+        tcp_server.close()
+        await tcp_server.wait_closed()
+        worker_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker_task
+        db.close()
+
+    assert acquire_response != "NULL\n"
+    assert backlog_at_first_dispatch[0] > 0
+    assert execution_order.index("ACQUIRE") < 10
 
 
 @pytest.mark.asyncio
